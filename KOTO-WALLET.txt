@@ -1,0 +1,144 @@
+diff --git a/configure.ac b/configure.ac
+index 04cafa9..0e6cde2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -436,11 +436,13 @@ if test x$use_hardening != xno; then
+     HARDENED_CPPFLAGS="$HARDENED_CPPFLAGS -D_FORTIFY_SOURCE=2"
+   ],[AC_MSG_ERROR(Cannot enable -D_FORTIFY_SOURCE=2)])
+ 
+-  AX_CHECK_LINK_FLAG([[-Wl,-z,relro]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,relro"],[AC_MSG_ERROR(Cannot enable RELRO)])
+-  AX_CHECK_LINK_FLAG([[-Wl,-z,now]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,now"],[AC_MSG_ERROR(Cannot enable BIND_NOW)])
+ 
+   if test x$TARGET_OS != xwindows; then
+     # All windows code is PIC, forcing it on just adds useless compile warnings
++
++  AX_CHECK_LINK_FLAG([[-Wl,-z,relro]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,relro"],[AC_MSG_ERROR(Cannot enable RELRO)])
++  AX_CHECK_LINK_FLAG([[-Wl,-z,now]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,now"],[AC_MSG_ERROR(Cannot enable BIND_NOW)])
++
+     AX_CHECK_COMPILE_FLAG([-fPIE],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fPIE"],[AC_MSG_ERROR(Cannot enable -fPIE)])
+     AX_CHECK_LINK_FLAG([[-pie]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -pie"],[AC_MSG_ERROR(Cannot enable -pie)])
+   else
+diff --git a/depends/builders/mingw32.mk b/depends/builders/mingw32.mk
+new file mode 100644
+index 0000000..1363785
+--- /dev/null
++++ b/depends/builders/mingw32.mk
+@@ -0,0 +1,2 @@
++build_minge32_SHA256SUM = sha256sum
++build_minge32_DOWNLOAD = curl --location --fail --connect-timeout $(DOWNLOAD_CONNECT_TIMEOUT) --retry $(DOWNLOAD_RETRIES) -o
+diff --git a/depends/hosts/mingw32.mk b/depends/hosts/mingw32.mk
+index dbfb62f..3f8ef32 100644
+--- a/depends/hosts/mingw32.mk
++++ b/depends/hosts/mingw32.mk
+@@ -1,3 +1,5 @@
++mingw32_CC=x86_64-w64-mingw32-gcc-posix
++mingw32_CXX=x86_64-w64-mingw32-g++-posix
+ mingw32_CFLAGS=-pipe
+ mingw32_CXXFLAGS=$(mingw32_CFLAGS)
+ 
+diff --git a/depends/packages/bdb.mk b/depends/packages/bdb.mk
+index 1134e94..1471c7f 100644
+--- a/depends/packages/bdb.mk
++++ b/depends/packages/bdb.mk
+@@ -9,18 +9,16 @@ define $(package)_set_vars
+ $(package)_config_opts=--disable-shared --enable-cxx --disable-replication
+ $(package)_config_opts_mingw32=--enable-mingw
+ $(package)_config_opts_linux=--with-pic
+-$(package)_cxxflags=-std=c++11
+-endef
+-
+-define $(package)_preprocess_cmds
+-  sed -i.old 's/__atomic_compare_exchange\\(/__atomic_compare_exchange_db(/' src/dbinc/atomic.h && \
+-  sed -i.old 's/atomic_init/atomic_init_db/' src/dbinc/atomic.h src/mp/mp_region.c src/mp/mp_mvcc.c src/mp/mp_fget.c src/mutex/mut_method.c src/mutex/mut_tas.c
+ endef
+ 
+ define $(package)_config_cmds
+   ../dist/$($(package)_autoconf)
+ endef
+ 
++define $(package)_preprocess_cmds
++   sed -i "s/WinIoCtl.h/winioctl.h/g" src/dbinc/win_db.h
++ endef
++
+ define $(package)_build_cmds
+   $(MAKE) libdb_cxx-6.2.a libdb-6.2.a
+ endef
+diff --git a/depends/packages/rust.mk b/depends/packages/rust.mk
+index f61dd22..cdefbdb 100644
+--- a/depends/packages/rust.mk
++++ b/depends/packages/rust.mk
+@@ -1,10 +1,8 @@
+ package=rust
+ $(package)_version=1.16.0
+ $(package)_download_path=https://static.rust-lang.org/dist
+-$(package)_file_name_linux=rust-$($(package)_version)-x86_64-unknown-linux-gnu.tar.gz
+-$(package)_sha256_hash_linux=48621912c242753ba37cad5145df375eeba41c81079df46f93ffb4896542e8fd
+-$(package)_file_name_darwin=rust-$($(package)_version)-x86_64-apple-darwin.tar.gz
+-$(package)_sha256_hash_darwin=2d08259ee038d3a2c77a93f1a31fc59e7a1d6d1bbfcba3dba3c8213b2e5d1926
++$(package)_file_name=rust-$($(package)_version)-x86_64-unknown-linux-gnu.tar.gz
++$(package)_sha256_hash=48621912c242753ba37cad5145df375eeba41c81079df46f93ffb4896542e8fd
+ 
+ define $(package)_stage_cmds
+   ./install.sh --destdir=$($(package)_staging_dir) --prefix=$(host_prefix)/native --disable-ldconfig
+diff --git a/src/metrics.cpp b/src/metrics.cpp
+index 6a17f93..72294d3 100644
+--- a/src/metrics.cpp
++++ b/src/metrics.cpp
+@@ -16,7 +16,14 @@
+ #include <boost/thread.hpp>
+ #include <boost/thread/synchronized_value.hpp>
+ #include <string>
++
++#ifdef WIN32
++#include <io.h>
++#include <windows.h>
++#else
+ #include <sys/ioctl.h>
++#endif
++
+ #include <unistd.h>
+ 
+ void AtomicTimer::start()
+@@ -444,11 +451,18 @@ void ThreadShowMetricsScreen()
+ 
+         // Get current window size
+         if (isTTY) {
++        #ifdef WIN32
++	CONSOLE_SCREEN_BUFFER_INFO csbi;
++	GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
++        cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
++        #else
++	  cols = 80;
+             struct winsize w;
+             w.ws_col = 0;
+             if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) != -1 && w.ws_col != 0) {
+                 cols = w.ws_col;
+             }
++        #endif
+         }
+ 
+         if (isScreen) {
+diff --git a/zcutil/build-win64.sh b/zcutil/build-win64.sh
+new file mode 100644
+index 0000000..f886661
+--- /dev/null
++++ b/zcutil/build-win64.sh
+@@ -0,0 +1,17 @@
++#!/bin/bash
++HOST=x86_64-w64-mingw32
++CXX=x86_64-w64-mingw32-g++-posix
++CC=x86_64-w64-mingw32-gcc-posix
++PREFIX="$(pwd)/depends/$HOST"
++
++set -eu -o pipefail
++
++set -x
++cd "$(dirname "$(readlink -f "$0")")/.."
++
++cd depends/ && make HOST=$HOST V=1 NO_QT=1 && cd ../
++./autogen.sh
++CONFIG_SITE=$PWD/depends/x86_64-w64-mingw32/share/config.site CXXFLAGS+=" -fopenmp" ./configure --prefix="${PREFIX}" --host=x86_64-w64-mingw32 --enable-static --disable-shared --disable-zmq --disable-rust
++sed -i 's/-lboost_system-mt /-lboost_system-mt-s /' configure
++cd src/
++CC="${CC}" CXX="${CXX}" make V=1 -j4 kotod.exe koto-cli.exe koto-tx.exe
+\ No newline at end of file
